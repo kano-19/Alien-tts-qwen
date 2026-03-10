@@ -19,6 +19,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("AlienTTSQwen")
+logging.getLogger("sox").setLevel(logging.ERROR)
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -809,7 +810,6 @@ if __name__ == "__main__":
     demo = build_ui()
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7860,
         share=False,
         inbrowser=True,
     )
