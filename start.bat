@@ -1,12 +1,11 @@
 @echo off
 title Alien TTS Qwen
 color 09
-chcp 65001 >nul 2>&1
 
 echo.
-echo  ╔══════════════════════════════════════════════════╗
-echo  ║       🛸 Alien TTS Qwen - Iniciando 🛸            ║
-echo  ╚══════════════════════════════════════════════════╝
+echo  ====================================================
+echo       Alien TTS Qwen - Iniciando Servidor
+echo  ====================================================
 echo.
 
 REM Check venv exists

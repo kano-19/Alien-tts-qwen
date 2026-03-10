@@ -37,8 +37,8 @@ def get_system_info() -> dict:
             info["gpu_name"] = torch.cuda.get_device_name(0)
             info["cuda_version"] = torch.version.cuda or "N/A"
 
-            vram_total = torch.cuda.get_device_properties(0).total_mem / (1024**3)
-            vram_free = (torch.cuda.get_device_properties(0).total_mem - torch.cuda.memory_allocated(0)) / (1024**3)
+            vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            vram_free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)) / (1024**3)
 
             info["vram_total_gb"] = round(vram_total, 2)
             info["vram_free_gb"] = round(vram_free, 2)

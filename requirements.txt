@@ -1,4 +1,4 @@
-qwen-tts>=0.2.0
+qwen-tts>=0.1.0
 gradio>=5.0.0
 torch>=2.1.0
 torchaudio>=2.1.0
