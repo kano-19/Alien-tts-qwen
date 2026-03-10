@@ -124,9 +124,9 @@ MODE_INFO = {
         "show_fish_fields": False,
     },
     "🐟 Fish Audio S2 Pro": {
-        "text_placeholder": "Escribe el texto que quieres generar con Fish Audio S2 Pro...\n\nSoporta tags como [laugh], [whispers], [super happy]\n\nEjemplo: [laugh] ¡Hola! Esto es increíble.",
+        "text_placeholder": "Escribe el texto que quieres generar con Fish Audio...\n\nSoporta tags como [laugh], [whispers], [super happy]\n\nEjemplo: [laugh] ¡Hola! Esto es increíble.",
         "instruct_placeholder": "Transcripción del audio de referencia (recomendado):\nEscribe lo que dice tu audio de referencia.",
-        "description": "⚠️ LICENCIA CC-NC: Solo uso personal, NO comercial. TTS de alta calidad con clonación de voz vía Fish Audio API (nube).",
+        "description": "⚠️ LICENCIA CC-NC: Solo uso personal, NO comercial. TTS local con clonación de voz. Modelo S1-mini (~4GB VRAM). Se descarga automáticamente.",
         "show_speaker": False,
         "show_ref_audio": True,
         "show_voice_desc": False,
@@ -300,19 +300,19 @@ def _gen_design_clone(ref_sentence, voice_description, language, text, model_siz
 def _gen_fish_audio(text, ref_audio, ref_text, upscale, progress):
     from engines import fish_audio
 
-    if not fish_audio.is_available():
-        return None, "❌ fish-audio-sdk no instalado. Ejecuta: pip install fish-audio-sdk"
+    # Auto-install and download model on first use
+    progress(0.05, desc="🐟 Verificando Fish Audio...")
+    setup_msg = fish_audio.setup_if_needed(model_name="s1-mini", progress_callback=progress)
+    if "❌" in setup_msg:
+        return None, setup_msg
 
-    if not fish_audio.get_api_key():
-        return None, "❌ API Key de Fish Audio no configurada. Pégala en Settings o en el campo de API Key."
-
-    progress(0.1, desc="🐟 Conectando con Fish Audio API...")
-    progress(0.2, desc="🐟 Generando audio con S2 Pro...")
+    progress(0.3, desc="🐟 Generando audio localmente con Fish Audio...")
 
     wav, sr = fish_audio.generate(
         text=text,
         ref_audio_path=ref_audio if ref_audio else None,
         ref_text=ref_text if ref_text else "",
+        model_name="s1-mini",
     )
 
     if upscale and sr < 48000:
@@ -322,13 +322,18 @@ def _gen_fish_audio(text, ref_audio, ref_text, upscale, progress):
     wav = audio_utils.normalize(wav)
     path = audio_utils.export(wav, sr)
     duration = audio_utils.get_duration_str(wav, sr)
-    status = f"✅ {duration} | {sr}Hz | 🐟 Fish Audio S2 Pro | Guardado: {os.path.basename(path)}"
+    status = f"✅ {duration} | {sr}Hz | 🐟 Fish Audio S1-mini (local) | Guardado: {os.path.basename(path)}"
     return (sr, wav), status
 
 
-def save_fish_api_key(key):
+def install_fish_audio_manual():
+    """Manual install trigger from the UI."""
     from engines import fish_audio
-    return fish_audio.set_api_key(key)
+    msg1 = fish_audio.install_fish_speech()
+    if "❌" in msg1:
+        return msg1
+    msg2 = fish_audio.download_model("s1-mini")
+    return f"{msg1} | {msg2}"
 
 
 def unload_all_models():
@@ -681,20 +686,19 @@ def build_ui():
 
                 # Fish Audio specific fields
                 fish_license_warning = gr.Markdown(
-                    "⚠️ **LICENCIA NO COMERCIAL:** Fish Audio S2 Pro está bajo licencia "
+                    "⚠️ **LICENCIA NO COMERCIAL:** Fish Audio está bajo licencia "
                     "Research / CC-NC. Solo para uso personal. El uso comercial requiere "
-                    "licencia directa de Fish Audio.",
+                    "licencia directa de Fish Audio.\n\n"
+                    "💻 **Modo local:** El modelo se instala y descarga automáticamente "
+                    "la primera vez que generas audio. Tamaño: ~2GB.",
                     elem_classes=["license-warning"],
                     visible=False,
                 )
                 with gr.Row(visible=False) as fish_api_row:
-                    fish_api_key = gr.Textbox(
-                        label="🔑 Fish Audio API Key",
-                        placeholder="Pega tu API key de fish.audio aquí...",
-                        type="password",
-                        scale=3,
+                    fish_install_btn = gr.Button(
+                        "🐟 Instalar Fish Audio (local)",
+                        variant="secondary", size="sm", scale=1,
                     )
-                    fish_save_key_btn = gr.Button("💾 Guardar", size="sm", scale=1)
 
                 with gr.Row():
                     upscale = gr.Checkbox(
@@ -747,6 +751,9 @@ def build_ui():
                 # Fish Audio fields
                 gr.update(visible=is_fish),
                 gr.update(visible=is_fish),
+                # Hide Idioma/Modelo for Fish Audio (not needed)
+                gr.update(visible=not is_fish),
+                gr.update(visible=not is_fish),
             ]
             return updates
 
@@ -755,13 +762,13 @@ def build_ui():
             inputs=[mode_selector],
             outputs=[text_input, instruct_input, speaker, ref_audio, voice_desc,
                      ref_sentence, mode_desc, ref_text_transcript, x_vector_only,
-                     fish_license_warning, fish_api_row],
+                     fish_license_warning, fish_api_row,
+                     language, model_size],
         )
 
-        # ── Fish API key save ──
-        fish_save_key_btn.click(
-            fn=save_fish_api_key,
-            inputs=[fish_api_key],
+        # ── Fish install button ──
+        fish_install_btn.click(
+            fn=install_fish_audio_manual,
             outputs=[status_output],
         )
 

@@ -1,175 +1,295 @@
 """
-Fish Audio S2 Pro Engine - Voice synthesis and cloning via Fish Audio API.
+Fish Audio Engine - Local inference using Fish Speech S1-mini.
+
+This engine runs ENTIRELY locally. Models are downloaded on-demand
+only when the user selects this mode for the first time.
 
 LICENSE NOTICE:
-  Fish Audio S2 Pro is restricted to NON-COMMERCIAL use.
+  Fish Audio S2 Pro / S1 models are restricted to NON-COMMERCIAL use.
   License: Research / CC-NC
   You may use the code (MIT) but the MODEL is non-commercial only.
+
+Supported models (auto-selected by VRAM):
+  - fishaudio/s1-mini  (0.5B params, ~4GB VRAM)  ← default for <12GB
+  - fishaudio/s2-pro   (larger, ~12GB VRAM)       ← if available
 """
 
 import os
-import io
-import wave
-import struct
+import sys
 import logging
+import subprocess
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# License text shown in UI
+# ── Constants ────────────────────────────────────────────────────────────
+
+PROJECT_ROOT = Path(__file__).parent.parent
+FISH_DIR = PROJECT_ROOT / "fish-speech"
+CHECKPOINTS_DIR = FISH_DIR / "checkpoints"
+
 LICENSE_WARNING = (
-    "⚠️ AVISO DE LICENCIA: Fish Audio S2 Pro está bajo licencia "
+    "⚠️ AVISO DE LICENCIA: Fish Audio está bajo licencia "
     "Research / CC-NC. Solo para uso personal y no comercial. "
     "El uso comercial requiere licencia de Fish Audio."
 )
 
-# Check if fish-audio-sdk is available
-try:
-    from fish_audio_sdk import Session, TTSRequest, ReferenceAudio
-    FISH_AVAILABLE = True
-except ImportError:
-    FISH_AVAILABLE = False
-    logger.warning("fish-audio-sdk not installed. Run: pip install fish-audio-sdk")
+# ── State ────────────────────────────────────────────────────────────────
+
+_installed = None
+_model_loaded = False
+_model_variant = None  # "s1-mini" or "s2-pro"
 
 
-def is_available() -> bool:
-    """Check if the Fish Audio SDK is installed."""
-    return FISH_AVAILABLE
-
-
-def get_api_key() -> str:
-    """Get API key from environment or config file."""
-    key = os.environ.get("FISH_API_KEY", "")
-    if not key:
-        config_path = os.path.join(os.path.dirname(__file__), "..", "fish_api_key.txt")
-        config_path = os.path.normpath(config_path)
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
-                key = f.read().strip()
-    return key
-
-
-def set_api_key(key: str) -> str:
-    """Save API key to config file."""
-    config_path = os.path.join(os.path.dirname(__file__), "..", "fish_api_key.txt")
-    config_path = os.path.normpath(config_path)
-    with open(config_path, "w") as f:
-        f.write(key.strip())
-    os.environ["FISH_API_KEY"] = key.strip()
-    return "✅ API Key guardada correctamente."
-
-
-def _pcm_bytes_to_numpy(audio_bytes: bytes, sample_rate: int = 44100) -> tuple[np.ndarray, int]:
-    """Convert raw PCM/WAV bytes to numpy array."""
+def is_installed() -> bool:
+    """Check if fish-speech is installed and ready."""
+    global _installed
+    if _installed is not None:
+        return _installed
     try:
-        # Try to read as WAV first
-        buf = io.BytesIO(audio_bytes)
-        with wave.open(buf, 'rb') as wf:
-            sr = wf.getframerate()
-            n_channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            n_frames = wf.getnframes()
-            raw_data = wf.readframes(n_frames)
+        import fish_speech
+        _installed = True
+    except ImportError:
+        _installed = False
+    return _installed
 
-            if sampwidth == 2:
-                dtype = np.int16
-            elif sampwidth == 4:
-                dtype = np.int32
-            else:
-                dtype = np.uint8
 
-            audio = np.frombuffer(raw_data, dtype=dtype).astype(np.float32)
-            if dtype == np.int16:
-                audio /= 32768.0
-            elif dtype == np.int32:
-                audio /= 2147483648.0
+def get_available_models() -> list[str]:
+    """Return list of downloaded model variants."""
+    models = []
+    if CHECKPOINTS_DIR.exists():
+        for d in CHECKPOINTS_DIR.iterdir():
+            if d.is_dir() and (d / "codec.pth").exists():
+                models.append(d.name)
+    return models
 
-            if n_channels > 1:
-                audio = audio.reshape(-1, n_channels).mean(axis=1)
 
-            return audio, sr
-    except Exception:
-        pass
+def get_recommended_model(vram_gb: float) -> str:
+    """Pick best model for available VRAM."""
+    if vram_gb >= 12:
+        return "s2-pro"
+    return "s1-mini"
 
-    # Fallback: treat as raw PCM int16
-    n_samples = len(audio_bytes) // 2
-    audio = np.array(
-        struct.unpack(f"<{n_samples}h", audio_bytes[:n_samples * 2]),
-        dtype=np.float32
-    ) / 32768.0
-    return audio, sample_rate
+
+def install_fish_speech(progress_callback=None) -> str:
+    """
+    Install fish-speech package locally by cloning the repo.
+    Only runs once, skips if already installed.
+    """
+    global _installed
+
+    if is_installed():
+        return "✅ Fish Speech ya está instalado."
+
+    if progress_callback:
+        progress_callback(0.1, desc="🐟 Clonando fish-speech...")
+
+    # Clone if not present
+    if not FISH_DIR.exists():
+        logger.info("Cloning fish-speech repository...")
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1",
+             "https://github.com/fishaudio/fish-speech.git",
+             str(FISH_DIR)],
+            capture_output=True, text=True, cwd=str(PROJECT_ROOT)
+        )
+        if result.returncode != 0:
+            return f"❌ Error clonando: {result.stderr}"
+
+    if progress_callback:
+        progress_callback(0.4, desc="🐟 Instalando dependencias de fish-speech...")
+
+    # Install the package
+    logger.info("Installing fish-speech package...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        capture_output=True, text=True, cwd=str(FISH_DIR)
+    )
+    if result.returncode != 0:
+        return f"❌ Error instalando: {result.stderr[:500]}"
+
+    _installed = True
+
+    if progress_callback:
+        progress_callback(0.7, desc="✅ Fish Speech instalado!")
+
+    return "✅ Fish Speech instalado correctamente."
+
+
+def download_model(model_name: str = "s1-mini", progress_callback=None) -> str:
+    """
+    Download model weights from HuggingFace.
+    Only downloads if not already present.
+    """
+    checkpoint_dir = CHECKPOINTS_DIR / model_name
+
+    if checkpoint_dir.exists() and (checkpoint_dir / "codec.pth").exists():
+        return f"✅ Modelo {model_name} ya descargado."
+
+    if progress_callback:
+        progress_callback(0.3, desc=f"🐟 Descargando modelo {model_name}...")
+
+    hf_repo = f"fishaudio/{model_name}"
+    logger.info(f"Downloading model weights: {hf_repo}")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "huggingface_hub.cli.main", "download",
+         hf_repo, "--local-dir", str(checkpoint_dir)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        # Try alternate download method
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(hf_repo, local_dir=str(checkpoint_dir))
+        except Exception as e:
+            return f"❌ Error descargando modelo: {str(e)}"
+
+    if progress_callback:
+        progress_callback(0.8, desc=f"✅ Modelo {model_name} listo!")
+
+    return f"✅ Modelo {model_name} descargado en {checkpoint_dir}"
+
+
+def setup_if_needed(model_name: str = "s1-mini", progress_callback=None) -> str:
+    """Install fish-speech and download model if not already done."""
+    status_parts = []
+
+    if not is_installed():
+        msg = install_fish_speech(progress_callback)
+        status_parts.append(msg)
+        if "❌" in msg:
+            return msg
+
+    checkpoint_dir = CHECKPOINTS_DIR / model_name
+    if not checkpoint_dir.exists() or not (checkpoint_dir / "codec.pth").exists():
+        msg = download_model(model_name, progress_callback)
+        status_parts.append(msg)
+        if "❌" in msg:
+            return msg
+
+    return " | ".join(status_parts) if status_parts else "✅ Todo listo."
 
 
 def generate(
     text: str,
-    language: str = "Auto",
     ref_audio_path: Optional[str] = None,
     ref_text: str = "",
-    model_id: str = "",
+    model_name: str = "s1-mini",
 ) -> tuple[np.ndarray, int]:
     """
-    Generate speech using Fish Audio S2 Pro API.
+    Generate speech using local Fish Speech inference.
+
+    Pipeline:
+      1. Encode reference audio → VQ tokens (if cloning)
+      2. Generate semantic tokens from text
+      3. Decode semantic tokens → audio
 
     Args:
         text: Text to synthesize
-        language: Target language
-        ref_audio_path: Path to reference audio file for voice cloning
+        ref_audio_path: Optional path to reference audio for voice cloning
         ref_text: Transcript of reference audio
-        model_id: Fish Audio model/voice ID (from fish.audio platform)
+        model_name: "s1-mini" or "s2-pro"
 
     Returns:
         Tuple of (wav_array, sample_rate)
     """
-    if not FISH_AVAILABLE:
+    if not is_installed():
         raise RuntimeError(
-            "fish-audio-sdk no está instalado.\n"
-            "Ejecuta: pip install fish-audio-sdk"
+            "Fish Speech no está instalado. "
+            "Selecciona el modo Fish Audio para instalarlo automáticamente."
         )
 
-    api_key = get_api_key()
-    if not api_key:
+    checkpoint_dir = CHECKPOINTS_DIR / model_name
+    if not checkpoint_dir.exists():
         raise RuntimeError(
-            "API Key de Fish Audio no configurada.\n"
-            "1. Crea una cuenta en https://fish.audio\n"
-            "2. Obtén tu API key del dashboard\n"
-            "3. Pégala en la pestaña de Settings de Alien TTS"
+            f"Modelo {model_name} no descargado. "
+            "Se descargará automáticamente la primera vez."
         )
 
-    session = Session(api_key)
+    # Use subprocess to run inference scripts from fish-speech
+    # This avoids conflicts between the two PyTorch installations
+    output_dir = tempfile.mkdtemp(prefix="fish_")
+    output_wav = os.path.join(output_dir, "output.wav")
 
-    # Build request
-    kwargs = {"text": text}
+    try:
+        # Step 1: Encode reference audio (if voice cloning)
+        prompt_tokens_path = None
+        if ref_audio_path:
+            logger.info("Step 1: Encoding reference audio...")
+            result = subprocess.run(
+                [sys.executable,
+                 str(FISH_DIR / "fish_speech" / "models" / "dac" / "inference.py"),
+                 "-i", ref_audio_path,
+                 "--checkpoint-path", str(checkpoint_dir / "codec.pth"),
+                 ],
+                capture_output=True, text=True, cwd=str(FISH_DIR)
+            )
+            if result.returncode != 0:
+                logger.warning(f"Codec encoding warning: {result.stderr[:300]}")
+            prompt_tokens_path = os.path.join(FISH_DIR, "fake.npy")
 
-    # Voice cloning via reference audio
-    if ref_audio_path:
-        with open(ref_audio_path, "rb") as f:
-            audio_bytes = f.read()
-        ref = ReferenceAudio(
-            audio=audio_bytes,
-            text=ref_text if ref_text.strip() else None,
+        # Step 2: Generate semantic tokens from text
+        logger.info("Step 2: Generating semantic tokens...")
+        cmd = [
+            sys.executable,
+            str(FISH_DIR / "fish_speech" / "models" / "text2semantic" / "inference.py"),
+            "--text", text,
+            "--half",  # Use FP16 for lower VRAM
+        ]
+        if prompt_tokens_path and os.path.exists(prompt_tokens_path):
+            cmd.extend(["--prompt-tokens", prompt_tokens_path])
+        if ref_text:
+            cmd.extend(["--prompt-text", ref_text])
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(FISH_DIR)
         )
-        kwargs["references"] = [ref]
+        if result.returncode != 0:
+            raise RuntimeError(f"Text2Semantic error: {result.stderr[:500]}")
 
-    # Use a specific model/voice from Fish Audio platform
-    if model_id and model_id.strip():
-        kwargs["reference_id"] = model_id.strip()
+        # Find generated codes file
+        codes_file = os.path.join(FISH_DIR, "codes_0.npy")
+        if not os.path.exists(codes_file):
+            raise RuntimeError("No se generaron tokens semánticos.")
 
-    # Generate
-    logger.info(f"Generating with Fish Audio: {len(text)} chars, clone={bool(ref_audio_path)}")
-    request = TTSRequest(**kwargs)
+        # Step 3: Decode tokens to audio
+        logger.info("Step 3: Decoding to audio...")
+        result = subprocess.run(
+            [sys.executable,
+             str(FISH_DIR / "fish_speech" / "models" / "dac" / "inference.py"),
+             "-i", codes_file,
+             "--checkpoint-path", str(checkpoint_dir / "codec.pth"),
+             ],
+            capture_output=True, text=True, cwd=str(FISH_DIR)
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Decoder error: {result.stderr[:500]}")
 
-    # Collect audio chunks
-    audio_data = bytearray()
-    for chunk in session.tts(request):
-        audio_data.extend(chunk)
+        # Read the output
+        output_file = os.path.join(FISH_DIR, "fake.wav")
+        if not os.path.exists(output_file):
+            raise RuntimeError("No se generó archivo de audio.")
 
-    if not audio_data:
-        raise RuntimeError("Fish Audio devolvió audio vacío.")
+        import soundfile as sf
+        wav, sr = sf.read(output_file)
+        wav = wav.astype(np.float32)
+        if wav.ndim > 1:
+            wav = wav.mean(axis=1)
 
-    # Convert to numpy
-    wav, sr = _pcm_bytes_to_numpy(bytes(audio_data))
-    logger.info(f"Fish Audio: generated {len(wav)/sr:.1f}s at {sr}Hz")
-    return wav, sr
+        logger.info(f"Fish Audio: generated {len(wav)/sr:.1f}s at {sr}Hz")
+        return wav, sr
+
+    finally:
+        # Cleanup temp files
+        for f in ["fake.npy", "fake.wav", "codes_0.npy"]:
+            p = os.path.join(FISH_DIR, f)
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
