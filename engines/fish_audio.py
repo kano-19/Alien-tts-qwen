@@ -120,7 +120,7 @@ def install_fish_speech(progress_callback=None) -> str:
     return "✅ Fish Speech instalado correctamente."
 
 
-def download_model(model_name: str = "s1-mini", progress_callback=None) -> str:
+def download_model(model_name: str = "s1-mini", progress_callback=None, hf_token: str = "") -> str:
     """
     Download model weights from HuggingFace.
     Only downloads if not already present.
@@ -136,18 +136,26 @@ def download_model(model_name: str = "s1-mini", progress_callback=None) -> str:
     hf_repo = f"fishaudio/{model_name}"
     logger.info(f"Downloading model weights: {hf_repo}")
 
+    # Set HF token environment variable if provided
+    env = os.environ.copy()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+
     result = subprocess.run(
         [sys.executable, "-m", "huggingface_hub.cli.main", "download",
-         hf_repo, "--local-dir", str(checkpoint_dir)],
-        capture_output=True, text=True
+         hf_repo, "--local-dir", str(checkpoint_dir)] + (["--token", hf_token] if hf_token else []),
+        capture_output=True, text=True, env=env
     )
     if result.returncode != 0:
         # Try alternate download method
         try:
             from huggingface_hub import snapshot_download
-            snapshot_download(hf_repo, local_dir=str(checkpoint_dir))
+            snapshot_download(hf_repo, local_dir=str(checkpoint_dir), token=hf_token if hf_token else None)
         except Exception as e:
-            return f"❌ Error descargando modelo: {str(e)}"
+            err_msg = str(e)
+            if "401" in err_msg or "gated repo" in err_msg.lower():
+                return f"❌ Error: El modelo {hf_repo} requiere acceso. Pega tu HuggingFace Token (Read) en la interfaz."
+            return f"❌ Error descargando modelo: {err_msg}"
 
     if progress_callback:
         progress_callback(0.8, desc=f"✅ Modelo {model_name} listo!")

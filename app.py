@@ -164,7 +164,7 @@ def on_mode_change(mode):
 
 def generate_tts(mode, text, instruct, speaker, language, model_size, upscale,
                   ref_audio, ref_text_transcript, voice_description, ref_sentence,
-                  x_vector_only, progress=gr.Progress()):
+                  x_vector_only, hf_token, progress=gr.Progress()):
     """Unified generation function that dispatches to the correct engine."""
     if not text.strip():
         return None, "❌ Ingresa texto para generar."
@@ -179,7 +179,7 @@ def generate_tts(mode, text, instruct, speaker, language, model_size, upscale,
         elif mode == "🔧 Design → Clone":
             return _gen_design_clone(ref_sentence, voice_description, language, text, model_size, upscale, progress)
         elif mode == "🐟 Fish Audio S2 Pro":
-            return _gen_fish_audio(text, ref_audio, ref_text_transcript, upscale, progress)
+            return _gen_fish_audio(text, ref_audio, ref_text_transcript, upscale, hf_token, progress)
         else:
             return None, f"❌ Modo desconocido: {mode}"
     except Exception as e:
@@ -298,12 +298,12 @@ def _gen_design_clone(ref_sentence, voice_description, language, text, model_siz
                            upscale, progress, start_pct=0.2)
 
 
-def _gen_fish_audio(text, ref_audio, ref_text, upscale, progress):
+def _gen_fish_audio(text, ref_audio, ref_text, upscale, hf_token, progress):
     from engines import fish_audio
 
     # Auto-install and download model on first use
     progress(0.05, desc="🐟 Verificando Fish Audio...")
-    setup_msg = fish_audio.setup_if_needed(model_name="s1-mini", progress_callback=progress)
+    setup_msg = fish_audio.setup_if_needed(model_name="s1-mini", progress_callback=progress, hf_token=hf_token)
     if "❌" in setup_msg:
         return None, setup_msg
 
@@ -327,13 +327,13 @@ def _gen_fish_audio(text, ref_audio, ref_text, upscale, progress):
     return (sr, wav), status
 
 
-def install_fish_audio_manual():
+def install_fish_audio_manual(hf_token):
     """Manual install trigger from the UI."""
     from engines import fish_audio
     msg1 = fish_audio.install_fish_speech()
     if "❌" in msg1:
         return msg1
-    msg2 = fish_audio.download_model("s1-mini")
+    msg2 = fish_audio.download_model("s1-mini", hf_token=hf_token)
     return f"{msg1} | {msg2}"
 
 
@@ -691,11 +691,19 @@ def build_ui():
                     "Research / CC-NC. Solo para uso personal. El uso comercial requiere "
                     "licencia directa de Fish Audio.\n\n"
                     "💻 **Modo local:** El modelo se instala y descarga automáticamente "
-                    "la primera vez que generas audio. Tamaño: ~2GB.",
+                    "la primera vez que generas audio.\n\n"
+                    "🔒 **Token Requerido:** Necesitas un token de lectura de HuggingFace para "
+                    "descargar este modelo (es gratuito). Pégalo abajo.",
                     elem_classes=["license-warning"],
                     visible=False,
                 )
                 with gr.Row(visible=False) as fish_api_row:
+                    hf_token_input = gr.Textbox(
+                        label="HuggingFace Token (Read)",
+                        placeholder="hf_xxxxxxxxxxxxxxxxxxx",
+                        type="password",
+                        scale=3,
+                    )
                     fish_install_btn = gr.Button(
                         "🐟 Instalar Fish Audio (local)",
                         variant="secondary", size="sm", scale=1,
@@ -770,6 +778,7 @@ def build_ui():
         # ── Fish install button ──
         fish_install_btn.click(
             fn=install_fish_audio_manual,
+            inputs=[hf_token_input],
             outputs=[status_output],
         )
 
@@ -787,7 +796,7 @@ def build_ui():
         ).then(
             fn=generate_tts,
             inputs=[mode_selector, text_input, instruct_input, speaker, language, model_size,
-                    upscale, ref_audio, ref_text_transcript, voice_desc, ref_sentence, x_vector_only],
+                    upscale, ref_audio, ref_text_transcript, voice_desc, ref_sentence, x_vector_only, hf_token_input],
             outputs=[audio_output, status_output],
         ).then(
             fn=on_generate_end,
