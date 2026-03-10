@@ -121,8 +121,23 @@ MODE_INFO = {
         "show_ref_audio": False,
         "show_voice_desc": True,
         "show_ref_sentence": True,
+        "show_fish_fields": False,
+    },
+    "🐟 Fish Audio S2 Pro": {
+        "text_placeholder": "Escribe el texto que quieres generar con Fish Audio S2 Pro...\n\nSoporta tags como [laugh], [whispers], [super happy]\n\nEjemplo: [laugh] ¡Hola! Esto es increíble.",
+        "instruct_placeholder": "Transcripción del audio de referencia (recomendado):\nEscribe lo que dice tu audio de referencia.",
+        "description": "⚠️ LICENCIA CC-NC: Solo uso personal, NO comercial. TTS de alta calidad con clonación de voz vía Fish Audio API (nube).",
+        "show_speaker": False,
+        "show_ref_audio": True,
+        "show_voice_desc": False,
+        "show_ref_sentence": False,
+        "show_fish_fields": True,
     },
 }
+
+# Add show_fish_fields default to all modes that don't have it
+for _mode_key in MODE_INFO:
+    MODE_INFO[_mode_key].setdefault("show_fish_fields", False)
 
 MODES = list(MODE_INFO.keys())
 
@@ -162,6 +177,8 @@ def generate_tts(mode, text, instruct, speaker, language, model_size, upscale,
             return _gen_voice_clone(text, language, ref_audio, ref_text_transcript, x_vector_only, model_size, upscale, progress)
         elif mode == "🔧 Design → Clone":
             return _gen_design_clone(ref_sentence, voice_description, language, text, model_size, upscale, progress)
+        elif mode == "🐟 Fish Audio S2 Pro":
+            return _gen_fish_audio(text, ref_audio, ref_text_transcript, upscale, progress)
         else:
             return None, f"❌ Modo desconocido: {mode}"
     except Exception as e:
@@ -278,6 +295,40 @@ def _gen_design_clone(ref_sentence, voice_description, language, text, model_siz
     return _process_chunks(engine_fn, text,
                            {"language": language, "prompt": prompt, "model_size": model_size},
                            upscale, progress, start_pct=0.2)
+
+
+def _gen_fish_audio(text, ref_audio, ref_text, upscale, progress):
+    from engines import fish_audio
+
+    if not fish_audio.is_available():
+        return None, "❌ fish-audio-sdk no instalado. Ejecuta: pip install fish-audio-sdk"
+
+    if not fish_audio.get_api_key():
+        return None, "❌ API Key de Fish Audio no configurada. Pégala en Settings o en el campo de API Key."
+
+    progress(0.1, desc="🐟 Conectando con Fish Audio API...")
+    progress(0.2, desc="🐟 Generando audio con S2 Pro...")
+
+    wav, sr = fish_audio.generate(
+        text=text,
+        ref_audio_path=ref_audio if ref_audio else None,
+        ref_text=ref_text if ref_text else "",
+    )
+
+    if upscale and sr < 48000:
+        progress(0.9, desc="📈 Upscaling a 48kHz...")
+        wav, sr = audio_upscaler.upscale(wav, sr, 48000)
+
+    wav = audio_utils.normalize(wav)
+    path = audio_utils.export(wav, sr)
+    duration = audio_utils.get_duration_str(wav, sr)
+    status = f"✅ {duration} | {sr}Hz | 🐟 Fish Audio S2 Pro | Guardado: {os.path.basename(path)}"
+    return (sr, wav), status
+
+
+def save_fish_api_key(key):
+    from engines import fish_audio
+    return fish_audio.set_api_key(key)
 
 
 def unload_all_models():
@@ -424,6 +475,16 @@ CUSTOM_CSS = """
 /* ── Progress styling ── */
 .progress-wrap .wrap {
     animation: progress-glow 2s ease-in-out infinite;
+}
+
+/* ── License warning ── */
+.license-warning {
+    background: rgba(180, 83, 9, 0.15) !important;
+    border: 1px solid rgba(251, 191, 36, 0.4) !important;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 0.82rem;
+    color: #fbbf24 !important;
 }
 
 footer { display: none !important; }
@@ -618,6 +679,23 @@ def build_ui():
                     visible=False,
                 )
 
+                # Fish Audio specific fields
+                fish_license_warning = gr.Markdown(
+                    "⚠️ **LICENCIA NO COMERCIAL:** Fish Audio S2 Pro está bajo licencia "
+                    "Research / CC-NC. Solo para uso personal. El uso comercial requiere "
+                    "licencia directa de Fish Audio.",
+                    elem_classes=["license-warning"],
+                    visible=False,
+                )
+                with gr.Row(visible=False) as fish_api_row:
+                    fish_api_key = gr.Textbox(
+                        label="🔑 Fish Audio API Key",
+                        placeholder="Pega tu API key de fish.audio aquí...",
+                        type="password",
+                        scale=3,
+                    )
+                    fish_save_key_btn = gr.Button("💾 Guardar", size="sm", scale=1)
+
                 with gr.Row():
                     upscale = gr.Checkbox(
                         label="📈 Upscale a 48kHz (mejor calidad)",
@@ -651,19 +729,24 @@ def build_ui():
         # ── Mode change handler ──
         def on_mode_changed(mode):
             info = MODE_INFO[mode]
+            is_fish = info.get("show_fish_fields", False)
+            is_clone = info["show_ref_audio"] and not is_fish
             updates = [
                 gr.update(placeholder=info["text_placeholder"]),
                 gr.update(placeholder=info["instruct_placeholder"],
-                         visible=not info["show_voice_desc"]),
+                         visible=not info["show_voice_desc"] and not is_fish),
                 gr.update(visible=info["show_speaker"]),
                 gr.update(visible=info["show_ref_audio"]),
                 gr.update(visible=info["show_voice_desc"],
                          placeholder=info["instruct_placeholder"] if info["show_voice_desc"] else ""),
                 gr.update(visible=info["show_ref_sentence"]),
                 f"**{mode}** — {info['description']}",
-                # Show ref transcript + x_vector only for clone mode
+                # Show ref transcript for clone + fish modes
                 gr.update(visible=info["show_ref_audio"]),
-                gr.update(visible=info["show_ref_audio"]),
+                gr.update(visible=is_clone),
+                # Fish Audio fields
+                gr.update(visible=is_fish),
+                gr.update(visible=is_fish),
             ]
             return updates
 
@@ -671,7 +754,15 @@ def build_ui():
             fn=on_mode_changed,
             inputs=[mode_selector],
             outputs=[text_input, instruct_input, speaker, ref_audio, voice_desc,
-                     ref_sentence, mode_desc, ref_text_transcript, x_vector_only],
+                     ref_sentence, mode_desc, ref_text_transcript, x_vector_only,
+                     fish_license_warning, fish_api_row],
+        )
+
+        # ── Fish API key save ──
+        fish_save_key_btn.click(
+            fn=save_fish_api_key,
+            inputs=[fish_api_key],
+            outputs=[status_output],
         )
 
         # ── Generate handler ──
