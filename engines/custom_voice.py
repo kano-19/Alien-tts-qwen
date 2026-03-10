@@ -45,7 +45,7 @@ def get_languages(model_size: str = "1.7B") -> list:
     model = mgr.load(get_model_key(model_size))
     try:
         languages = model.get_supported_languages()
-        return list(languages) if languages else []
+        return [lang.capitalize() for lang in languages] if languages else []
     except Exception as e:
         logger.warning(f"Could not get languages: {e}")
         return [
