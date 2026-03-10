@@ -50,6 +50,9 @@ def generate(
     model = mgr.load(model_key)
 
     try:
+        # Qwen3-TTS expects capitalized language names
+        language = language.strip().title() if language else "Auto"
+
         kwargs = {
             "text": text,
             "language": language,

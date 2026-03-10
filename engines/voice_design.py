@@ -36,6 +36,9 @@ def generate(
     model = mgr.load(MODEL_KEY)
 
     try:
+        # Qwen3-TTS expects capitalized language names
+        language = language.strip().title() if language else "Auto"
+
         wavs, sr = model.generate_voice_design(
             text=text,
             language=language,
