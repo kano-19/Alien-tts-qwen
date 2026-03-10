@@ -248,6 +248,7 @@ def generate(
             str(FISH_DIR / "fish_speech" / "models" / "text2semantic" / "inference.py"),
             "--text", text,
             "--half",  # Use FP16 for lower VRAM
+            "--checkpoint-path", str(checkpoint_dir),
         ]
         if prompt_tokens_path and os.path.exists(prompt_tokens_path):
             cmd.extend(["--prompt-tokens", prompt_tokens_path])
