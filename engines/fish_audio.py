@@ -163,7 +163,7 @@ def download_model(model_name: str = "s1-mini", progress_callback=None, hf_token
     return f"✅ Modelo {model_name} descargado en {checkpoint_dir}"
 
 
-def setup_if_needed(model_name: str = "s1-mini", progress_callback=None) -> str:
+def setup_if_needed(model_name: str = "s1-mini", progress_callback=None, hf_token: str = "") -> str:
     """Install fish-speech and download model if not already done."""
     status_parts = []
 
@@ -175,7 +175,7 @@ def setup_if_needed(model_name: str = "s1-mini", progress_callback=None) -> str:
 
     checkpoint_dir = CHECKPOINTS_DIR / model_name
     if not checkpoint_dir.exists() or not (checkpoint_dir / "codec.pth").exists():
-        msg = download_model(model_name, progress_callback)
+        msg = download_model(model_name, progress_callback, hf_token=hf_token)
         status_parts.append(msg)
         if "❌" in msg:
             return msg
