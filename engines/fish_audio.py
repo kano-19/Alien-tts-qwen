@@ -158,9 +158,51 @@ def download_model(model_name: str = "s1-mini", progress_callback=None, hf_token
             return f"❌ Error descargando modelo: {err_msg}"
 
     if progress_callback:
-        progress_callback(0.8, desc=f"✅ Modelo {model_name} listo!")
+        progress_callback(0.8, desc=f"✅ Modelo {model_name} listo! Parcheando tokenizer...")
 
-    return f"✅ Modelo {model_name} descargado en {checkpoint_dir}"
+    # Fix: The s1-mini model lacks a tokenizer config on HF, causing transformers to crash
+    if "s1-mini" in model_name:
+        _patch_s1_tokenizer(str(checkpoint_dir))
+
+    return f"✅ Modelo {model_name} descargado en {checkpoint_dir} y parcheado"
+
+def _patch_s1_tokenizer(checkpoint_dir: str):
+    """
+    Downloads missing Qwen2 tokenizer files and injects Fish Audio semantic tokens 
+    so Transformers can instantiate the tokenizer without raising a 'dual_ar' architecture KeyError.
+    """
+    tk_json = os.path.join(checkpoint_dir, "tokenizer.json")
+    if os.path.exists(tk_json) and os.path.getsize(tk_json) > 1000:
+        return # Already patched
+
+    logger.info("Patching missing tokenizer files for S1-mini...")
+    from huggingface_hub import snapshot_download
+    from transformers import AutoTokenizer
+    import json
+
+    try:
+        # Download working tokenizer config from Qwen
+        snapshot_download(
+            repo_id="Qwen/Qwen2-7B-Instruct",
+            allow_patterns=["tokenizer_config.json", "tokenizer.json", "vocab.json", "merges.txt"],
+            local_dir=checkpoint_dir,
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, trust_remote_code=True)
+        
+        # Inject Fish Audio's 4096 semantic tokens dynamically
+        special_tk_path = os.path.join(checkpoint_dir, "special_tokens.json")
+        if os.path.exists(special_tk_path):
+            with open(special_tk_path, "r", encoding="utf-8") as f:
+                special_tokens = json.load(f)
+            
+            sorted_items = sorted(special_tokens.items(), key=lambda item: item[1])
+            tokens_to_add = [item[0] for item in sorted_items]
+            tokenizer.add_tokens(tokens_to_add)
+            tokenizer.save_pretrained(checkpoint_dir)
+            logger.info(f"Successfully injected {len(tokens_to_add)} semantic tokens into tokenizer -> vocab size: {len(tokenizer)}")
+    except Exception as e:
+        logger.error(f"Failed to patch tokenizer: {e}")
 
 
 def setup_if_needed(model_name: str = "s1-mini", progress_callback=None, hf_token: str = "") -> str:
