@@ -283,12 +283,18 @@ def generate(
                 logger.warning(f"Codec encoding warning: {result.stderr[:300]}")
             prompt_tokens_path = os.path.join(FISH_DIR, "fake.npy")
 
+        # Use venv python if available, otherwise fallback to sys.executable
+        python_exe = os.path.join(PROJECT_ROOT, "venv", "Scripts", "python.exe")
+        if not os.path.exists(python_exe):
+            python_exe = sys.executable
+
         # Step 2: Generate semantic tokens from text
         logger.info("Step 2: Generating semantic tokens...")
         cmd = [
-            sys.executable,
+            python_exe,
             str(FISH_DIR / "fish_speech" / "models" / "text2semantic" / "inference.py"),
             "--text", text,
+            "--max-new-tokens", "1024",  # Add a hard cap to prevent infinite hallucination loops
             "--half",  # Use FP16 for lower VRAM
             "--checkpoint-path", str(checkpoint_dir),
         ]
