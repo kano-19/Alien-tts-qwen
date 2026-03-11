@@ -158,11 +158,19 @@ def download_model(model_name: str = "s1-mini", progress_callback=None, hf_token
             return f"❌ Error descargando modelo: {err_msg}"
 
     if progress_callback:
-        progress_callback(0.8, desc=f"✅ Modelo {model_name} listo! Parcheando tokenizer...")
+        progress_callback(0.8, desc=f"✅ Modelo {model_name} listo! Parcheando dependencias...")
 
     # Fix: The s1-mini model lacks a tokenizer config on HF, causing transformers to crash
     if "s1-mini" in model_name:
         _patch_s1_tokenizer(str(checkpoint_dir))
+
+    # Apply chunk generation patch for 0-token phrases
+    sys.path.append(str(PROJECT_ROOT))
+    try:
+        from patch_inference import apply_inference_patch
+        apply_inference_patch()
+    except Exception as e:
+        logger.warning(f"No se pudo aplicar parche a inference.py: {e}")
 
     return f"✅ Modelo {model_name} descargado en {checkpoint_dir} y parcheado"
 
