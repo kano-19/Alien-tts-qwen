@@ -38,11 +38,22 @@ LICENSE_WARNING = (
     "El uso comercial requiere licencia de Fish Audio."
 )
 
+# ── Subprocess timeout (seconds) ──
+SUBPROCESS_TIMEOUT = 120
+
 # ── State ────────────────────────────────────────────────────────────────
 
 _installed = None
 _model_loaded = False
 _model_variant = None  # "s1-mini" or "s2-pro"
+
+
+def _get_python_exe() -> str:
+    """Get the correct Python executable (venv first, fallback to sys.executable)."""
+    venv_python = os.path.join(PROJECT_ROOT, "venv", "Scripts", "python.exe")
+    if os.path.exists(venv_python):
+        return venv_python
+    return sys.executable
 
 
 def is_installed() -> bool:
@@ -106,7 +117,7 @@ def install_fish_speech(progress_callback=None) -> str:
     # Install the package
     logger.info("Installing fish-speech package...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+        [_get_python_exe(), "-m", "pip", "install", "-e", ".", "--quiet"],
         capture_output=True, text=True, cwd=str(FISH_DIR)
     )
     if result.returncode != 0:
@@ -142,7 +153,7 @@ def download_model(model_name: str = "s1-mini", progress_callback=None, hf_token
         env["HF_TOKEN"] = hf_token
 
     result = subprocess.run(
-        [sys.executable, "-m", "huggingface_hub.cli.main", "download",
+        [_get_python_exe(), "-m", "huggingface_hub.cli.main", "download",
          hf_repo, "--local-dir", str(checkpoint_dir)] + (["--token", hf_token] if hf_token else []),
         capture_output=True, text=True, env=env
     )
@@ -163,14 +174,6 @@ def download_model(model_name: str = "s1-mini", progress_callback=None, hf_token
     # Fix: The s1-mini model lacks a tokenizer config on HF, causing transformers to crash
     if "s1-mini" in model_name:
         _patch_s1_tokenizer(str(checkpoint_dir))
-
-    # Apply chunk generation patch for 0-token phrases
-    sys.path.append(str(PROJECT_ROOT))
-    try:
-        from patch_inference import apply_inference_patch
-        apply_inference_patch()
-    except Exception as e:
-        logger.warning(f"No se pudo aplicar parche a inference.py: {e}")
 
     return f"✅ Modelo {model_name} descargado en {checkpoint_dir} y parcheado"
 
@@ -233,6 +236,21 @@ def setup_if_needed(model_name: str = "s1-mini", progress_callback=None, hf_toke
     return " | ".join(status_parts) if status_parts else "✅ Todo listo."
 
 
+def _estimate_max_tokens(text: str) -> int:
+    """
+    Estimate a reasonable max token budget for the given text.
+    
+    Fish Speech generates ~12 audio tokens per second of speech.
+    Average speech rate is ~3 words/second in Spanish.
+    So: tokens ≈ (word_count / 3) * 12 = word_count * 4
+    
+    We add a generous 2x safety margin and clamp to [50, 512].
+    """
+    word_count = len(text.split())
+    estimated = word_count * 8  # ~8 tokens per word with margin
+    return max(50, min(estimated, 512))
+
+
 def generate(
     text: str,
     ref_audio_path: Optional[str] = None,
@@ -242,10 +260,9 @@ def generate(
     """
     Generate speech using local Fish Speech inference.
 
-    Pipeline:
-      1. Encode reference audio → VQ tokens (if cloning)
-      2. Generate semantic tokens from text
-      3. Decode semantic tokens → audio
+    Pipeline (single step with --output flag):
+      1. Encode reference audio → VQ tokens (if cloning, via --prompt-audio)
+      2. Generate semantic tokens from text AND decode to WAV in one pass
 
     Args:
         text: Text to synthesize
@@ -269,92 +286,120 @@ def generate(
             "Se descargará automáticamente la primera vez."
         )
 
-    # Use subprocess to run inference scripts from fish-speech
-    # This avoids conflicts between the two PyTorch installations
+    python_exe = _get_python_exe()
+
+    # Create a temp directory for all outputs
     output_dir = tempfile.mkdtemp(prefix="fish_")
-    output_wav = os.path.join(output_dir, "output.wav")
+    output_wav = os.path.join(output_dir, "generated.wav")
 
     try:
-        # Step 1: Encode reference audio (if voice cloning)
-        prompt_tokens_path = None
-        if ref_audio_path:
-            logger.info("Step 1: Encoding reference audio...")
-            result = subprocess.run(
-                [sys.executable,
-                 str(FISH_DIR / "fish_speech" / "models" / "dac" / "inference.py"),
-                 "-i", ref_audio_path,
-                 "--checkpoint-path", str(checkpoint_dir / "codec.pth"),
-                 ],
-                capture_output=True, text=True, cwd=str(FISH_DIR)
-            )
-            if result.returncode != 0:
-                logger.warning(f"Codec encoding warning: {result.stderr[:300]}")
-            prompt_tokens_path = os.path.join(FISH_DIR, "fake.npy")
+        # Calculate smart token budget based on text length
+        max_tokens = _estimate_max_tokens(text)
+        logger.info(f"Text length: {len(text)} chars, {len(text.split())} words → max_tokens={max_tokens}")
 
-        # Use venv python if available, otherwise fallback to sys.executable
-        python_exe = os.path.join(PROJECT_ROOT, "venv", "Scripts", "python.exe")
-        if not os.path.exists(python_exe):
-            python_exe = sys.executable
-
-        # Step 2: Generate semantic tokens from text
-        logger.info("Step 2: Generating semantic tokens...")
+        # Build the inference command — single step: text → wav
+        # Using --output flag makes inference.py decode directly to audio
         cmd = [
             python_exe,
             str(FISH_DIR / "fish_speech" / "models" / "text2semantic" / "inference.py"),
             "--text", text,
-            "--max-new-tokens", "1024",  # Add a hard cap to prevent infinite hallucination loops
+            "--max-new-tokens", str(max_tokens),
             "--half",  # Use FP16 for lower VRAM
             "--checkpoint-path", str(checkpoint_dir),
+            "--output-dir", output_dir,
+            "--output", output_wav,  # This triggers direct WAV output
         ]
-        if prompt_tokens_path and os.path.exists(prompt_tokens_path):
-            cmd.extend(["--prompt-tokens", prompt_tokens_path])
-        if ref_text:
-            cmd.extend(["--prompt-text", ref_text])
+
+        # Voice cloning: pass reference audio directly
+        if ref_audio_path and os.path.exists(ref_audio_path):
+            logger.info("Adding reference audio for voice cloning...")
+            cmd.extend(["--prompt-audio", ref_audio_path])
+            if ref_text.strip():
+                cmd.extend(["--prompt-text", ref_text.strip()])
+
+        logger.info(f"Running Fish Audio inference (timeout={SUBPROCESS_TIMEOUT}s)...")
+        logger.info(f"Command: {' '.join(cmd[:6])}...")
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, cwd=str(FISH_DIR)
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(FISH_DIR),
+            timeout=SUBPROCESS_TIMEOUT,
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"Text2Semantic error: {result.stderr[:500]}")
 
-        # Find generated codes file
-        codes_file = os.path.join(FISH_DIR, "codes_0.npy")
+        # Log stderr for debugging (it contains loguru output)
+        if result.stderr:
+            for line in result.stderr.strip().split('\n')[-5:]:
+                logger.info(f"[fish-speech] {line.strip()}")
+
+        if result.returncode != 0:
+            # Extract the most useful error info
+            stderr_tail = result.stderr[-500:] if result.stderr else "No error output"
+            raise RuntimeError(f"Fish Audio inference failed (code {result.returncode}): {stderr_tail}")
+
+        # Check if WAV was generated directly
+        if os.path.exists(output_wav):
+            import soundfile as sf
+            wav, sr = sf.read(output_wav)
+            wav = wav.astype(np.float32)
+            if wav.ndim > 1:
+                wav = wav.mean(axis=1)
+            logger.info(f"Fish Audio: generated {len(wav)/sr:.1f}s at {sr}Hz (direct decode)")
+            return wav, sr
+
+        # Fallback: check for codes_0.npy and decode separately
+        codes_file = os.path.join(output_dir, "codes_0.npy")
         if not os.path.exists(codes_file):
-            raise RuntimeError("No se generaron tokens semánticos.")
+            raise RuntimeError(
+                "Fish Audio no generó audio ni tokens. "
+                "Puede que el texto sea demasiado corto o el modelo no soporte el idioma."
+            )
 
-        # Step 3: Decode tokens to audio
-        logger.info("Step 3: Decoding to audio...")
+        logger.info("Direct decode not available, falling back to codec decoder...")
+        
+        # Step 2: Decode tokens to audio using codec
+        fallback_wav = os.path.join(output_dir, "decoded.wav")
+        codec_cmd = [
+            python_exe,
+            str(FISH_DIR / "fish_speech" / "models" / "dac" / "inference.py"),
+            "--input-path", codes_file,
+            "--output-path", fallback_wav,
+            "--checkpoint-path", str(checkpoint_dir / "codec.pth"),
+        ]
+
         result = subprocess.run(
-            [sys.executable,
-             str(FISH_DIR / "fish_speech" / "models" / "dac" / "inference.py"),
-             "-i", codes_file,
-             "--checkpoint-path", str(checkpoint_dir / "codec.pth"),
-             ],
-            capture_output=True, text=True, cwd=str(FISH_DIR)
+            codec_cmd,
+            capture_output=True,
+            text=True,
+            cwd=str(FISH_DIR),
+            timeout=60,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Decoder error: {result.stderr[:500]}")
+            raise RuntimeError(f"Codec decoder error: {result.stderr[-300:]}")
 
-        # Read the output
-        output_file = os.path.join(FISH_DIR, "fake.wav")
-        if not os.path.exists(output_file):
-            raise RuntimeError("No se generó archivo de audio.")
+        if not os.path.exists(fallback_wav):
+            raise RuntimeError("El decodificador de audio no generó archivo WAV.")
 
         import soundfile as sf
-        wav, sr = sf.read(output_file)
+        wav, sr = sf.read(fallback_wav)
         wav = wav.astype(np.float32)
         if wav.ndim > 1:
             wav = wav.mean(axis=1)
 
-        logger.info(f"Fish Audio: generated {len(wav)/sr:.1f}s at {sr}Hz")
+        logger.info(f"Fish Audio: generated {len(wav)/sr:.1f}s at {sr}Hz (codec fallback)")
         return wav, sr
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Fish Audio tardó más de {SUBPROCESS_TIMEOUT}s y fue cancelado. "
+            "Intenta con un texto más corto."
+        )
 
     finally:
         # Cleanup temp files
-        for f in ["fake.npy", "fake.wav", "codes_0.npy"]:
-            p = os.path.join(FISH_DIR, f)
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
+        import shutil
+        try:
+            shutil.rmtree(output_dir, ignore_errors=True)
+        except Exception:
+            pass
